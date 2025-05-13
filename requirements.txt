@@ -1,0 +1,20 @@
+fastapi
+uvicorn[standard]
+python-multipart # For file uploads
+pydantic
+
+# LangChain & Agentic RAG
+langchain
+langchain-google-genai # For Gemini
+langgraph
+langchain_community # For some loaders/splitters if needed
+
+# Vector Store & Embeddings
+chromadb
+sentence-transformers # For local embeddings
+
+# PDF Processing
+pymupdf # Fitz, for PDF text extraction
+
+# Environment variables
+python-dotenv
