@@ -92,48 +92,176 @@ async def chat_with_agent(query: ChatQuery = Body(...)):
         print(f"Received chat query for PDF ID {query.pdf_id}: {query.query}")
         
         # Run the agentic workflow
-        # The pdf_id in ChatQuery will be used to target the correct ChromaDB collection
-        # (e.g., by having vector_store.query_collection use f"{pdf_id}_{DEFAULT_COLLECTION_NAME}")
         result = run_agentic_workflow(
             pdf_id=query.pdf_id,
             query=query.query,
             chat_history=query.chat_history or []
         )
         
-        # The 'result' from run_agentic_workflow should already match ChatResponse structure closely.
-        # We might need to parse the 'data' field if it's a raw JSON string from the LLM.
-        
         response_type = result.get("response_type", "error")
-        data_payload = result.get("data", {}) # This could be {"raw_generation": "..."}
-
-        # Attempt to parse data_payload if it's raw JSON string for topics/questions
+        data_payload = result.get("data", {})
+        final_text = ""  # Initialize the final text response
+        
+        # Process data_payload if it's raw JSON string
         if 'raw_generation' in data_payload and isinstance(data_payload['raw_generation'], str):
             try:
                 parsed_generation = json.loads(data_payload['raw_generation'])
-                # Now try to fit it into our Pydantic models for specific response types
+                
                 if response_type == "ranked_topics":
                     data_payload = RankedTopicsResponse(**parsed_generation).dict()
+                    
+                    # Format topics with better structure and markdown
+                    topics_text = ["# 📚 Priority Topics for Your Exam\n"]
+                    
+                    # Group topics by priority level
+                    priority_groups = {}
+                    for topic in parsed_generation.get("topics", []):
+                        priority = topic.get('priority', 5)  # Default to lowest priority if missing
+                        if priority not in priority_groups:
+                            priority_groups[priority] = []
+                        priority_groups[priority].append(topic)
+                        
+                    # Add topics by priority groups
+                    for priority in sorted(priority_groups.keys()):
+                        priority_label = "🔴 Highest" if priority == 1 else "🟠 High" if priority == 2 else "🟡 Medium" if priority == 3 else "🟢 Lower" if priority == 4 else "🔵 Background"
+                        topics_text.append(f"\n## Priority {priority}: {priority_label}\n")
+                        
+                        for topic in priority_groups[priority]:
+                            topics_text.append(f"### {topic['name']}\n")
+                            topics_text.append(f"**Why it matters**: {topic['reasoning']}\n")
+                            
+                    final_text = "\n".join(topics_text)
+                    
                 elif response_type == "probable_questions":
                     data_payload = ProbableQuestionsResponse(**parsed_generation).dict()
-                elif response_type == "explanation": # Simple string explanation
+                    
+                    # Format questions with better structure and markdown
+                    questions_text = ["# 📝 Probable Exam Questions\n"]
+                    questions_text.append("*Based on your study materials, these questions are likely to appear:*\n")
+                    
+                    # Group questions by source if available
+                    source_groups = {"No specific source": []}
+                    for q in parsed_generation.get("questions", []):
+                        source = q.get('source_hint', "No specific source")
+                        if source not in source_groups:
+                            source_groups[source] = []
+                        source_groups[source].append(q)
+                    
+                    # Add questions by source groups
+                    for i, (source, questions) in enumerate(source_groups.items()):
+                        if questions:  # Only add sections with questions
+                            if source != "No specific source":
+                                questions_text.append(f"\n## From {source}:\n")
+                            elif i > 0:  # Only add this header if there are other sections
+                                questions_text.append(f"\n## Additional Questions:\n")
+                            
+                            for j, q in enumerate(questions, 1):
+                                questions_text.append(f"{j}. **{q['question']}**\n")
+                            
+                    final_text = "\n".join(questions_text)
+                    
+                elif response_type == "explanation":
                     data_payload = ConceptExplanationResponse(explanation=data_payload['raw_generation']).dict()
-                # else, keep raw if not a recognized structured type
+                    
+                    # Format explanation with better structure, adding title and sections
+                    explanation = data_payload.get('explanation', data_payload['raw_generation'])
+                    title_candidate = explanation.split('.')[0].strip()
+                    title = title_candidate if len(title_candidate) <= 60 else "Concept Explanation"
+                        
+                    formatted_text = [
+                        f"# 🔍 {title}\n",
+                        explanation
+                    ]
+                    final_text = "\n".join(formatted_text)
+                    
             except json.JSONDecodeError:
                 print(f"Warning: Could not parse raw_generation for {response_type} as JSON.")
-                # Fallback for explanation or if JSON parsing fails for others
                 if response_type == "explanation":
-                     data_payload = ConceptExplanationResponse(explanation=data_payload['raw_generation']).dict()
-                else: # Pass through the raw string if it's not an explanation and not valid JSON
-                     data_payload = {"raw_text": data_payload['raw_generation']} # Or handle error
-            except Exception as pydantic_e: # Catch Pydantic validation errors
+                    data_payload = ConceptExplanationResponse(explanation=data_payload.get('raw_generation', "")).dict()
+                    final_text = f"# 🔍 Explanation\n\n{data_payload.get('explanation', '')}"
+                else:
+                    data_payload = {"raw_text": data_payload.get('raw_generation', "")}
+                    final_text = f"# Response\n\n{data_payload.get('raw_text', '')}"
+            except Exception as pydantic_e:
                 print(f"Warning: Pydantic validation error for {response_type}: {pydantic_e}")
                 data_payload = {"raw_text": data_payload.get('raw_generation', "Error parsing LLM output.")}
-
+                final_text = f"# Response\n\n{data_payload.get('raw_text', 'Error parsing LLM output.')}"
+        else:
+            # Handle case when data_payload doesn't have raw_generation
+            if response_type == "error":
+                final_text = f"# ❌ Error\n\n{data_payload.get('error_message', 'An error occurred')}"
+            else:
+                # Try to extract meaningful text from data_payload
+                if isinstance(data_payload, dict):
+                    # Look for likely content fields
+                    for field in ['explanation', 'text', 'content', 'message']:
+                        if field in data_payload and isinstance(data_payload[field], str):
+                            final_text = f"# Response\n\n{data_payload[field]}"
+                            break
+                    if not final_text:  # If no field was found
+                        final_text = f"# Response\n\n{str(data_payload)}"
+                else:
+                    final_text = f"# Response\n\n{str(data_payload)}"
 
         return ChatResponse(
             response_type=response_type,
             data=data_payload,
-            chat_history=result.get("chat_history", [])
+            chat_history=result.get("chat_history", []),
+            final_text=final_text
+        )
+
+    except Exception as e:
+        print(f"Error in chat endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        error_message = f"Sorry, an error occurred: {str(e)}"
+        error_chat_history = query.chat_history or []
+        if not error_chat_history or error_chat_history[-1].get("content") != query.query:
+            error_chat_history.append({"role": "user", "content": query.query})
+        error_chat_history.append({"role": "assistant", "content": error_message})
+        
+        return ChatResponse(
+            response_type="error",
+            data={"error_message": str(e)},
+            chat_history=error_chat_history,
+            final_text=f"# ❌ Error\n\n{error_message}"
+        )
+
+    except Exception as e:
+        print(f"Error in chat endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        error_message = f"Sorry, an error occurred: {str(e)}"
+        error_chat_history = query.chat_history or []
+        if not error_chat_history or error_chat_history[-1].get("content") != query.query:
+            error_chat_history.append({"role": "user", "content": query.query})
+        error_chat_history.append({"role": "assistant", "content": error_message})
+        
+        return ChatResponse(
+            response_type="error",
+            data={"error_message": str(e)},
+            chat_history=error_chat_history,
+            final_text=error_message
+        )
+
+    except Exception as e:
+        print(f"Error in chat endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        error_message = f"Sorry, an error occurred: {str(e)}"
+        error_chat_history = query.chat_history or []
+        if not error_chat_history or error_chat_history[-1].get("content") != query.query:
+            error_chat_history.append({"role": "user", "content": query.query})
+        error_chat_history.append({"role": "assistant", "content": error_message})
+        
+        return ChatResponse(
+            response_type="error",
+            data={"error_message": str(e)},
+            chat_history=error_chat_history,
+            final_text=error_message
         )
 
     except Exception as e:

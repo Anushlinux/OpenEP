@@ -33,6 +33,7 @@ class ConceptExplanationResponse(BaseModel):
     examples: Optional[List[str]] = []
 
 class ChatResponse(BaseModel):
-    response_type: str # "explanation", "ranked_topics", "probable_questions", "error"
-    data: Dict[str, Any] # Will hold one of the above response models or an error message
+    response_type: str  # "explanation", "ranked_topics", "probable_questions", "error"
+    data: Dict[str, Any]  # Will hold one of the above response models or an error message
     chat_history: List[Dict[str, str]]
+    final_text: str  # A plain text version of the response for the frontend
